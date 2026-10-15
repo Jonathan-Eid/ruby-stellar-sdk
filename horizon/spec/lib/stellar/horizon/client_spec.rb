@@ -47,6 +47,60 @@ RSpec.describe Stellar::Horizon::Client do
     end
   end
 
+  describe "compression" do
+    let(:server) { TCPServer.new("127.0.0.1", 0) }
+    let(:client) { described_class.new(horizon: "http://127.0.0.1:#{server.addr[1]}") }
+    let(:requests) { [] }
+    let(:account) { {id: "GABC", sequence: "1", _links: {}}.to_json }
+    let(:root) do
+      {_links: {account: {href: "/accounts/{account_id}", templated: true}}}.to_json
+    end
+
+    # Minimal HTTP server that gzips its response when the client allows it, like Horizon
+    def serve
+      Thread.new do
+        loop do
+          socket = server.accept
+          lines = []
+          while (line = socket.gets) && line != "\r\n"
+            lines << line.chomp
+          end
+          requests << lines
+          body = lines.first.include?("/accounts/") ? account : root
+          headers = ["Content-Type: application/hal+json", "Connection: close"]
+          if lines.any? { |l| l =~ /\AAccept-Encoding:.*gzip/i }
+            body = ActiveSupport::Gzip.compress(body)
+            headers << "Content-Encoding: gzip"
+          end
+          socket.write "HTTP/1.1 200 OK\r\n#{headers.join("\r\n")}\r\n" \
+            "Content-Length: #{body.bytesize}\r\n\r\n#{body}"
+          socket.close
+        end
+      rescue IOError
+        nil
+      end
+    end
+
+    it "asks for gzip and transparently decodes the response" do
+      thread = serve
+
+      # talk to the local server for real, bypassing the VCR/WebMock hooks
+      VCR.turned_off do
+        WebMock.disable!
+        expect(client.account_info("GABC").sequence).to eq "1"
+      end
+
+      expect(requests.size).to eq 2
+      requests.each do |lines|
+        expect(lines).to include(match(/\AAccept-Encoding:.*gzip/i))
+      end
+    ensure
+      WebMock.enable!
+      server.close
+      thread&.join
+    end
+  end
+
   describe "#friendbot" do
     let(:client) { described_class.default_testnet }
     let(:account) { Stellar::Account.random }

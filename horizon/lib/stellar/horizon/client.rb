@@ -51,7 +51,9 @@ module Stellar::Horizon
           conn.use FaradayMiddleware::FollowRedirects
           conn.request :url_encoded
           conn.response :hal_json, content_type: /\bjson$/
-          conn.adapter :excon
+          # Excon sends no Accept-Encoding by default; this middleware asks Horizon for
+          # gzip/deflate and transparently decompresses the response.
+          conn.adapter :excon, middlewares: Excon.defaults[:middlewares] + [Excon::Middleware::Decompress]
         end
         client.headers = {
           "Accept" => "application/hal+json,application/problem+json,application/json",
